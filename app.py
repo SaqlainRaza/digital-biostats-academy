@@ -9,12 +9,13 @@ st.set_page_config(
     layout="wide"
 )
 
+# --- BUILT-IN SYNTHETIC SAUDI VIRTUAL WARD DATA ---
 @st.cache_data
 def generate_patient_multimodal_data():
     np.random.seed(42)
     hours = np.arange(0, 24, 0.25)
 
-    # Device 1: Continuous Glucose Monitor (CGM - mg/dL)
+    # Device 1: CGM Glucose (mg/dL)
     std_gluc = 135 + 25 * np.sin((hours - 8) * np.pi / 12) + 15 * np.exp(-((hours - 14) ** 2) / 2)
     ramadan_gluc = (
         125
@@ -28,11 +29,11 @@ def generate_patient_multimodal_data():
     hr_upper = hr_curve + np.random.uniform(4, 7, size=len(hours))
     hr_lower = hr_curve - np.random.uniform(4, 7, size=len(hours))
 
-    # Device 3: Wireless Pulse Oximeter (SpO2 %) - nocturnal dip around 03:00
+    # Device 3: Wireless Pulse Oximeter (SpO2 %)
     spo2_curve = 97.5 - 3.8 * np.exp(-((hours - 3.0) ** 2) / 2.5) + np.random.normal(0, 0.3, len(hours))
     spo2_curve = np.clip(spo2_curve, 88.0, 99.5)
 
-    # Device 4: Continuous ECG Patch (RMSSD Heart Rate Variability in ms)
+    # Device 4: Continuous ECG Patch HRV (ms)
     hrv_curve = 48 + 12 * np.cos((hours - 3) * np.pi / 12) - 16 * np.exp(-((hours - 19.0) ** 2) / 2.0)
     hrv_curve = np.clip(hrv_curve, 15.0, 85.0)
 
@@ -51,15 +52,93 @@ def generate_patient_multimodal_data():
         "HRV_ms": np.round(hrv_curve, 1),
     })
 
-df = generate_patient_multimodal_data()
+default_df = generate_patient_multimodal_data()
+
+# Create downloadable CSV template from default data
+template_df = pd.DataFrame({
+    "Hour": default_df.Hour,
+    "Glucose_mg_dL": default_df.Ramadan_Mean,
+    "Heart_Rate_bpm": default_df.HR_Mean,
+    "SpO2_pct": default_df.SpO2,
+    "ECG_HRV_ms": default_df.HRV_ms
+})
 
 st.title("📊 Digital Biostatistics Academy (DBA)")
 st.caption("Interactive Workforce Upskilling Sandbox • Built for Saudi Vision 2030 Health Transformation")
 
-st.info(
-    "👤 **Active Virtual Care Ward Patient:** `Patient ID: SA-1042` | Age: 48 | Diagnosis: Type-2 Diabetes, Hypertension & Sleep Apnea Risk\n\n"
-    "📡 **4 Connected Medical Devices Streaming Live:** `1. CGM Glucose Sensor` • `2. Smartwatch Telemetry` • `3. Wireless Pulse Oximeter (SpO₂)` • `4. Continuous ECG Patch`"
-)
+# --- DATA INGESTION & AUTO-ANALYSIS BAR ---
+with st.expander("📂 Data Ingestion Engine: Use Built-in Saudi Cohort or Upload Real Device CSV", expanded=True):
+    ing_c1, ing_c2, ing_c3 = st.columns((1.2, 1.5, 1))
+    with ing_c1:
+        data_source = st.radio(
+            "Select Telemetry Source:",
+            ("Built-in Saudi Virtual Ward Cohort", "Upload Custom Device CSV")
+        )
+    with ing_c2:
+        uploaded_file = st.file_uploader(
+            "Upload CSV (Columns: Hour, Glucose_mg_dL, Heart_Rate_bpm, SpO2_pct, ECG_HRV_ms)",
+            type=("csv",)
+        )
+    with ing_c3:
+        st.markdown("**Need a sample file to test?**")
+        st.download_button(
+            label="⬇️ Download Sample CSV Template",
+            data=template_df.to_csv(index=False).encode("utf-8"),
+            file_name="saudi_virtual_ward_telemetry.csv",
+            mime="text/csv"
+        )
+
+# Process Uploaded CSV if selected & provided
+using_custom_csv = False
+if data_source == "Upload Custom Device CSV" and uploaded_file is not None:
+    try:
+        raw_df = pd.read_csv(uploaded_file)
+        required_cols = {"Hour", "Glucose_mg_dL"}
+        if not required_cols.issubset(set(raw_df.columns)):
+            st.error("CSV must include at least 'Hour' and 'Glucose_mg_dL' columns. Click 'Download Sample CSV Template' to see the exact format.")
+            df = default_df.copy()
+        else:
+            raw_df = raw_df.sort_values("Hour").reset_index(drop=True)
+            gluc = raw_df["Glucose_mg_dL"].astype(float)
+            hr = raw_df["Heart_Rate_bpm"].astype(float) if "Heart_Rate_bpm" in raw_df.columns else pd.Series(np.repeat(74.0, len(raw_df)))
+            spo2 = raw_df["SpO2_pct"].astype(float) if "SpO2_pct" in raw_df.columns else pd.Series(np.repeat(97.0, len(raw_df)))
+            hrv = raw_df["ECG_HRV_ms"].astype(float) if "ECG_HRV_ms" in raw_df.columns else pd.Series(np.repeat(45.0, len(raw_df)))
+
+            # Auto-compute rolling functional confidence bands
+            gluc_std = gluc.rolling(window=4, min_periods=1).std().fillna(12.0)
+            hr_std = hr.rolling(window=4, min_periods=1).std().fillna(5.0)
+
+            df = pd.DataFrame({
+                "Hour": raw_df["Hour"].astype(float),
+                "Standard_Mean": gluc,
+                "Standard_Upper": gluc + 1.96 * gluc_std,
+                "Standard_Lower": gluc - 1.96 * gluc_std,
+                "Ramadan_Mean": gluc,
+                "Ramadan_Upper": gluc + 1.96 * gluc_std,
+                "Ramadan_Lower": gluc - 1.96 * gluc_std,
+                "HR_Mean": hr,
+                "HR_Upper": hr + 1.96 * hr_std,
+                "HR_Lower": hr - 1.96 * hr_std,
+                "SpO2": spo2,
+                "HRV_ms": hrv,
+            })
+            using_custom_csv = True
+            st.success(f"✅ Auto-Analysis Complete: Ingested **{len(df)} telemetry timestamps** from `{uploaded_file.name}` and updated all 4 device modules!")
+    except Exception as e:
+        st.error(f"Could not read CSV file: {e}")
+        df = default_df.copy()
+else:
+    df = default_df.copy()
+    if data_source == "Upload Custom Device CSV":
+        st.warning("⬆️ Please upload a CSV file above (or download the sample template to test).")
+
+if using_custom_csv:
+    st.info(f"👤 **Active Custom Telemetry Stream:** `{uploaded_file.name}` | Records: `{len(df)}` | Auto-modeled across 4 Connected Device Modules")
+else:
+    st.info(
+        "👤 **Active Virtual Care Ward Patient:** `Patient ID: SA-1042` | Age: 48 | Diagnosis: Type-2 Diabetes, Hypertension & Sleep Apnea Risk\n\n"
+        "📡 **4 Connected Medical Devices Streaming Live:** `1. CGM Glucose Sensor` • `2. Smartwatch Telemetry` • `3. Wireless Pulse Oximeter (SpO₂)` • `4. Continuous ECG Patch`"
+    )
 
 mod1, mod2, mod3, mod4 = st.tabs((
     "🩸 1. CGM Sensor",
@@ -75,19 +154,23 @@ with mod1:
     col_ctrl, col_viz = st.columns((1, 2.5))
     with col_ctrl:
         st.markdown("### Device 1: CGM Sensor")
-        cohort = st.selectbox(
-            "Select Patient Condition:",
-            ("Ramadan Fasting Protocol (SA-1042)", "Standard Routine Protocol (SA-1042)")
-        )
+        if using_custom_csv:
+            st.caption(f"Analyzing uploaded stream: **{uploaded_file.name}**")
+            cohort = "Custom Uploaded Stream"
+        else:
+            cohort = st.selectbox(
+                "Select Patient Condition:",
+                ("Ramadan Fasting Protocol (SA-1042)", "Standard Routine Protocol (SA-1042)")
+            )
         hypo_thresh = st.slider("Hypoglycemia Threshold (mg/dL)", 55, 85, 70)
         hyper_thresh = st.slider("Hyperglycemia Threshold (mg/dL)", 160, 220, 180)
         show_functional = st.toggle("Enable Digital Biostatistics Curve (FDA)", value=True)
 
     with col_viz:
-        if "Ramadan" in cohort:
-            y_mean, y_up, y_low = df.Ramadan_Mean, df.Ramadan_Upper, df.Ramadan_Lower
-        else:
+        if "Standard" in cohort:
             y_mean, y_up, y_low = df.Standard_Mean, df.Standard_Upper, df.Standard_Lower
+        else:
+            y_mean, y_up, y_low = df.Ramadan_Mean, df.Ramadan_Upper, df.Ramadan_Lower
 
         overall_mean = np.mean(y_mean)
         tir = np.mean((y_mean >= hypo_thresh) & (y_mean <= hyper_thresh)) * 100
@@ -118,7 +201,7 @@ with mod1:
                 line=dict(color='gray', width=3, dash='dash'), name='Traditional Single Mean'
             ))
 
-        fig.update_layout(title="Device 1 Stream: 24-Hour Continuous Glucose Trajectory", xaxis_title="Hour of Day", yaxis_title="Glucose (mg/dL)", height=360, margin=dict(l=20, r=20, t=40, b=20))
+        fig.update_layout(title="Device 1 Stream: Continuous Glucose Trajectory", xaxis_title="Hour of Day", yaxis_title="Glucose (mg/dL)", height=360, margin=dict(l=20, r=20, t=40, b=20))
         st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
@@ -130,7 +213,7 @@ with mod2:
         st.markdown("### Device 2: Smartwatch")
         hr_alert = st.slider("Tachycardia Alert Threshold (bpm)", 75, 105, 85)
         st.markdown("**Biostatistical Method:**\nCircadian Cosinor & Distributional Quantile Modeling")
-        st.caption("A single clinic pulse reading (72 bpm) misses post-meal autonomic spikes detected by continuous smartwatch streams.")
+        st.caption("A single clinic pulse reading (72 bpm) misses autonomic spikes detected by continuous smartwatch streams.")
 
     with c2_right:
         peak_hr = np.max(df.HR_Mean)
@@ -138,67 +221,3 @@ with mod2:
 
         hm1, hm2, hm3 = st.columns(3)
         hm1.metric("Clinic Visit Pulse", "72 bpm", "Single snapshot")
-        hm2.metric("24h Peak Smartwatch HR", f"{peak_hr:.0f} bpm", "Post-Iftar surge")
-        hm3.metric("Time Above Threshold", f"{elevated_pct:.0f}%", delta="Review Beta-Blocker" if elevated_pct > 15 else "Stable", delta_color="inverse")
-
-        fig_hr = go.Figure()
-        fig_hr.add_hline(y=hr_alert, line_dash="dot", line_color="red", annotation_text="Alert Threshold")
-        fig_hr.add_trace(go.Scatter(
-            x=pd.concat((df.Hour, df.Hour.iloc[::-1])),
-            y=pd.concat((df.HR_Upper, df.HR_Lower.iloc[::-1])),
-            fill='toself', fillcolor='rgba(220, 53, 69, 0.15)',
-            line=dict(color='rgba(255,255,255,0)'), name='Wearable Variability Band'
-        ))
-        fig_hr.add_trace(go.Scatter(
-            x=df.Hour, y=df.HR_Mean, mode='lines',
-            line=dict(color='#dc3545', width=3), name='Smartwatch Heart Rate (bpm)'
-        ))
-        fig_hr.update_layout(title="Device 2 Stream: 24-Hour Smartwatch Cardiac Trajectory", xaxis_title="Hour of Day", yaxis_title="Heart Rate (bpm)", height=360, margin=dict(l=20, r=20, t=40, b=20))
-        st.plotly_chart(fig_hr, use_container_width=True)
-
-# ==========================================
-# MODULE 3: PULSE OXIMETER & CONTINUOUS ECG PATCH
-# ==========================================
-with mod3:
-    c3_left, c3_right = st.columns((1, 2.5))
-    with c3_left:
-        st.markdown("### Devices 3 & 4: Oximeter & ECG Patch")
-        spo2_thresh = st.slider("Nocturnal Desaturation Alert (SpO₂ %)", 90, 96, 94)
-        hrv_thresh = st.slider("Low HRV Autonomic Stress Alert (ms)", 20, 45, 30)
-        st.markdown("**Biostatistical Method:**\nJoint Functional Threshold & Event-Rate Modeling")
-        st.caption("Daytime clinic SpO₂ (98%) looks normal, but overnight wireless oximetry + ECG patch HRV reveal nocturnal hypoxia and autonomic stress.")
-
-    with c3_right:
-        min_spo2 = np.min(df.SpO2)
-        desat_mins = int(np.sum(df.SpO2 < spo2_thresh) * 15)
-        min_hrv = np.min(df.HRV_ms)
-
-        om1, om2, om3 = st.columns(3)
-        om1.metric("Daytime Clinic SpO₂", "98.0%", "Misses sleep apnea")
-        om2.metric("Overnight Nadir SpO₂ (Device 3)", f"{min_spo2:.1f}%", delta=f"{desat_mins} mins < {spo2_thresh}%", delta_color="inverse")
-        om3.metric("Lowest ECG Patch HRV (Device 4)", f"{min_hrv:.0f} ms", delta="Autonomic Stress" if min_hrv < hrv_thresh else "Normal", delta_color="inverse")
-
-        fig_ox = go.Figure()
-        fig_ox.add_trace(go.Scatter(x=df.Hour, y=df.SpO2, mode='lines', name='Wireless Pulse Oximeter (SpO₂ %)', line=dict(color='#0d6efd', width=3)))
-        fig_ox.add_trace(go.Scatter(x=df.Hour, y=df.HRV_ms, mode='lines', name='ECG Patch HRV (RMSSD ms)', line=dict(color='#fd7e14', width=3, dash='dot'), yaxis="y2"))
-        fig_ox.add_hline(y=spo2_thresh, line_dash="dash", line_color="#0d6efd", annotation_text="SpO₂ Alert")
-
-        fig_ox.update_layout(
-            title="Devices 3 & 4 Streams: Overnight Pulse Oximetry (SpO₂) & ECG Patch HRV",
-            xaxis_title="Hour of Day",
-            yaxis=dict(title="SpO₂ (%)", range=(88, 100)),
-            yaxis2=dict(title="ECG HRV (ms)", overlaying="y", side="right", range=(10, 90)),
-            height=360,
-            margin=dict(l=20, r=20, t=40, b=20)
-        )
-        st.plotly_chart(fig_ox, use_container_width=True)
-
-# ==========================================
-# MODULE 4: 4-DEVICE MULTIMODAL RISK FUSION
-# ==========================================
-with mod4:
-    st.markdown("### 4-Device Multimodal Fusion & Micro-Randomized Trial Simulator")
-    st.write("Simulate how combining **all 4 connected medical devices** (CGM + Smartwatch + Pulse Oximeter + ECG Patch) enables precision timing of a **16:00 Virtual Ward Intervention**.")
-
-    nudge_active = st.toggle("🚀 Activate 4-Device Closed-Loop Virtual Ward Intervention", value=False)
-
